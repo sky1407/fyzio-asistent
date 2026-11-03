@@ -2,7 +2,7 @@ import "server-only";
 import * as z from "zod";
 import { requireSession } from "./auth";
 import { getSql } from "./db";
-import type { ChatTurn } from "./gemini";
+import type { ChatTurn } from "./ai-common";
 
 export const HISTORY_LIMIT = 30;
 

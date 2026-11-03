@@ -13,7 +13,8 @@ import {
   type AnswerWriter,
 } from "@/lib/server/conversations";
 import { listLibraryForAi } from "@/lib/server/exercises";
-import { GEMINI_ERROR_RESPONSES, GeminiError, streamChat, type ChatTurn } from "@/lib/server/gemini";
+import { AI_ERROR_RESPONSES, AiError, type ChatTurn } from "@/lib/server/ai-common";
+import { streamChat } from "@/lib/server/llm";
 import { getPatient } from "@/lib/server/patients";
 
 const BodySchema = z.discriminatedUnion("mode", [
@@ -113,7 +114,7 @@ export async function POST(request: Request): Promise<Response> {
 
   try {
     const [{ patient, turns, commit }, library] = await Promise.all([prepare(body), listLibraryForAi()]);
-    const stream = await streamChat(buildSystemInstruction(patient, library), turns, request.signal);
+    const { stream, provider } = await streamChat(buildSystemInstruction(patient, library), turns, request.signal);
     const { conversationId, save } = await commit();
 
     let answer = "";
@@ -161,13 +162,14 @@ export async function POST(request: Request): Promise<Response> {
         "Content-Type": "text/plain; charset=utf-8",
         "Cache-Control": "no-store",
         "X-Conversation-Id": conversationId,
+        "X-AI-Provider": provider,
       },
     });
   } catch (error) {
     if (error instanceof RequestError) return jsonError(error.status, error.message);
-    if (error instanceof GeminiError) {
-      console.error("Gemini error:", error.message);
-      const { status, message } = GEMINI_ERROR_RESPONSES[error.kind];
+    if (error instanceof AiError) {
+      console.error("AI error:", error.message);
+      const { status, message } = AI_ERROR_RESPONSES[error.kind];
       return jsonError(status, message);
     }
     if (request.signal.aborted) return jsonError(499, "Požiadavka bola zrušená.");

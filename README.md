@@ -10,7 +10,7 @@ The user interface is in Slovak. The app is designed for a single therapist; pat
 - **AI assistant** next to the patient list (tabs on mobile):
   - streamed answers, stop button, quick actions (rehabilitation plan, training, meal plan, summary and risks);
   - conversation history stored per patient, with deletion;
-  - automatic fallback to another Gemini model when one is overloaded (HTTP 503/429).
+  - automatic fallback to another Gemini model when one is overloaded or out of quota (HTTP 503/429), and then to Groq (`openai/gpt-oss-120b`) through an OpenAI-compatible client; answers from a fallback provider are labelled in the chat.
 - **Plans**: save any AI answer as a plan, edit it in Markdown with a live preview, print it or save it as PDF.
 - **Exercise library**: manage exercises manually or extract them from a saved plan. Gemini returns structured JSON and the therapist picks which exercises to keep. Duplicates are detected regardless of case, diacritics or parenthesised names. The assistant prefers library exercises in new plans.
 
@@ -21,6 +21,7 @@ Health data is a special category under GDPR, so the app minimises what leaves t
 - The AI only receives an **anonymised profile**: no name, no ID, no contact details. A unit test enforces this.
 - Free-text fields (notes, chat messages) are sent as written, so the UI reminds the therapist not to enter names.
 - Database (Neon Postgres) and serverless functions run in the EU (Frankfurt).
+- The optional Groq fallback processes the same anonymised prompts outside the EU; leave `GROQ_API_KEY` empty to disable it.
 - The AI only proposes; every plan is reviewed by the therapist. The app is not a medical device and does not make diagnoses.
 
 ## Tech stack
@@ -28,7 +29,7 @@ Health data is a special category under GDPR, so the app minimises what leaves t
 - Next.js 16 (App Router, Cache Components, Server Actions, Proxy), React 19, TypeScript
 - Tailwind CSS 4
 - Neon serverless Postgres (`@neondatabase/serverless`)
-- Google Gemini API (streaming SSE and JSON-schema output)
+- Google Gemini API (streaming SSE and JSON-schema output), Groq as an OpenAI-compatible fallback
 - zod for validation, Vitest for unit tests
 - Authentication: one scrypt-hashed password and an HMAC-signed, HTTP-only session cookie
 
@@ -53,6 +54,8 @@ npm run dev                    # http://localhost:3000
 | `SESSION_SECRET` | Random secret for signing the session cookie (min. 32 characters) |
 | `GEMINI_API_KEY` | Google AI Studio API key |
 | `GEMINI_MODEL` | Preferred model, defaults to `gemini-2.5-flash` |
+| `GROQ_API_KEY` | Optional. Groq API key used as a fallback when all Gemini models fail |
+| `GROQ_MODEL` | Optional. Groq model, defaults to `openai/gpt-oss-120b` |
 
 ## Scripts
 
@@ -75,5 +78,5 @@ src/proxy.ts               redirects unauthenticated requests
 src/app/(app)/             authenticated pages: patients, plans, exercises, AI assistant
 src/app/api/chat/          streaming chat endpoint
 src/lib/ai/                prompts, anonymised patient context, exercise extraction
-src/lib/server/            data access layer, auth, Gemini client
+src/lib/server/            data access layer, auth, AI clients (Gemini, OpenAI-compatible) and fallback
 ```

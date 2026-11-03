@@ -9,7 +9,14 @@ import { SavePlan } from "./save-plan";
 
 export type PatientOption = { id: string; label: string };
 
-type UiMessage = { id: string; role: "user" | "model"; content: string; stopped?: boolean; revision?: number };
+type UiMessage = {
+  id: string;
+  role: "user" | "model";
+  content: string;
+  stopped?: boolean;
+  revision?: number;
+  provider?: string;
+};
 
 type StreamBody =
   | { mode: "message"; conversationId: string | null; patientId: string | null; answerId: string; message: string }
@@ -169,6 +176,8 @@ export function AssistantPanel({
 
     const newConversationId = response.headers.get("X-Conversation-Id");
     if (newConversationId) setConversationId(newConversationId);
+    const provider = response.headers.get("X-AI-Provider") ?? undefined;
+    setMessages((previous) => previous.map((item) => (item.id === modelId ? { ...item, provider } : item)));
 
     const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
     for (;;) {
@@ -401,7 +410,10 @@ export function AssistantPanel({
                 ) : (
                   <p className="animate-pulse text-sm text-slate-500">AI premýšľa…</p>
                 )}
-                {message.stopped && !streaming && conversationId && (
+                {message.provider && message.provider !== "Gemini" && (
+                <p className="mt-2 text-xs text-slate-400">Odpovedal záložný model: {message.provider}</p>
+              )}
+              {message.stopped && !streaming && conversationId && (
                   <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-3">
                     <span className="text-sm text-slate-500">Odpoveď bola zastavená.</span>
                     <button

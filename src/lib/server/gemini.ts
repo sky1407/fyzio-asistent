@@ -1,31 +1,10 @@
 import "server-only";
 import * as z from "zod";
+import { AiError, REQUEST_TIMEOUT_MS, errorKindFromStatus, type ChatTurn } from "./ai-common";
 
-export type ChatTurn = { role: "user" | "model"; content: string };
-
-export type GeminiErrorKind = "config" | "overloaded" | "rate_limited" | "failed";
-
-export class GeminiError extends Error {
-  constructor(
-    readonly kind: GeminiErrorKind,
-    message: string,
-  ) {
-    super(message);
-    this.name = "GeminiError";
-  }
-}
-
-export const GEMINI_ERROR_RESPONSES: Record<GeminiErrorKind, { status: number; message: string }> = {
-  config: { status: 500, message: "AI asistent nie je nastavený (chýba API kľúč)." },
-  overloaded: { status: 503, message: "AI je momentálne preťažená. Skúste to o chvíľu znova." },
-  rate_limited: { status: 429, message: "Prekročený bezplatný limit AI. Skúste to o pár minút." },
-  failed: { status: 502, message: "AI neodpovedala. Skúste to znova." },
-};
-
-const API_BASE ="https://generativelanguage.googleapis.com/v1beta/models";
+const API_BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 const FALLBACK_MODELS = ["gemini-2.5-flash", "gemini-3.5-flash-lite", "gemini-3.5-flash"];
 const RETRYABLE_STATUSES = new Set([404, 429, 500, 503]);
-const REQUEST_TIMEOUT_MS = 120_000;
 
 const ChunkSchema = z.object({
   candidates: z
@@ -73,12 +52,6 @@ export function createSseTextParser(): (chunk: string) => string[] {
   };
 }
 
-function errorKind(status: number): GeminiErrorKind {
-  if (status === 429) return "rate_limited";
-  if (status === 503 || status === 500) return "overloaded";
-  return "failed";
-}
-
 type GeminiMethod = "streamGenerateContent?alt=sse" | "generateContent";
 
 async function requestWithFallback(
@@ -87,7 +60,7 @@ async function requestWithFallback(
   signal: AbortSignal,
 ): Promise<Response> {
   const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new GeminiError("config", "GEMINI_API_KEY is not set");
+  if (!apiKey) throw new AiError("config", "GEMINI_API_KEY is not set");
   const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]);
 
   let lastStatus = 0;
@@ -102,7 +75,7 @@ async function requestWithFallback(
       });
     } catch (error) {
       if (signal.aborted) throw error;
-      throw new GeminiError("failed", `Gemini request failed: ${error instanceof Error ? error.message : String(error)}`);
+      throw new AiError("failed", `Gemini request failed: ${error instanceof Error ? error.message : String(error)}`);
     }
     if (response.ok) return response;
 
@@ -111,10 +84,10 @@ async function requestWithFallback(
     console.warn(`Gemini model ${model} returned HTTP ${response.status}`);
     if (!RETRYABLE_STATUSES.has(response.status)) break;
   }
-  throw new GeminiError(errorKind(lastStatus), `Gemini request failed with HTTP ${lastStatus}`);
+  throw new AiError(errorKindFromStatus(lastStatus), `Gemini request failed with HTTP ${lastStatus}`);
 }
 
-export async function streamChat(
+export async function streamGemini(
   systemInstruction: string,
   history: ChatTurn[],
   signal: AbortSignal,
@@ -129,7 +102,7 @@ export async function streamChat(
     }),
     signal,
   );
-  if (!response.body) throw new GeminiError("failed", "Gemini returned an empty body");
+  if (!response.body) throw new AiError("failed", "Gemini returned an empty body");
 
   const parse = createSseTextParser();
   return response.body.pipeThrough(new TextDecoderStream()).pipeThrough(
@@ -153,7 +126,7 @@ const JsonEnvelopeSchema = z.object({
     .min(1),
 });
 
-export async function generateJson<T>(
+export async function generateGeminiJson<T>(
   prompt: string,
   responseSchema: object,
   validator: z.ZodType<T>,
@@ -175,7 +148,7 @@ export async function generateJson<T>(
   );
 
   const envelope = JsonEnvelopeSchema.safeParse(await response.json().catch(() => null));
-  if (!envelope.success) throw new GeminiError("failed", "Gemini returned no candidates");
+  if (!envelope.success) throw new AiError("failed", "Gemini returned no candidates");
   const text = envelope.data.candidates[0].content.parts
     .filter((part) => !part.thought)
     .map((part) => part.text ?? "")
@@ -185,9 +158,9 @@ export async function generateJson<T>(
   try {
     data = JSON.parse(text);
   } catch {
-    throw new GeminiError("failed", "Gemini returned malformed JSON");
+    throw new AiError("failed", "Gemini returned malformed JSON");
   }
   const parsed = validator.safeParse(data);
-  if (!parsed.success) throw new GeminiError("failed", "Gemini JSON did not match the schema");
+  if (!parsed.success) throw new AiError("failed", "Gemini JSON did not match the schema");
   return parsed.data;
 }

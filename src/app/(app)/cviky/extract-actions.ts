@@ -12,7 +12,8 @@ import {
 import { ExerciseInputSchema, exerciseKey, type ExerciseInput } from "@/lib/exercises/model";
 import { requireSession } from "@/lib/server/auth";
 import { addExercises, listExerciseKeys } from "@/lib/server/exercises";
-import { GEMINI_ERROR_RESPONSES, GeminiError, generateJson } from "@/lib/server/gemini";
+import { AI_ERROR_RESPONSES, AiError } from "@/lib/server/ai-common";
+import { generateJson } from "@/lib/server/llm";
 import { getPlan } from "@/lib/server/plans";
 
 const EXTRACTION_TIMEOUT_MS = 90_000;
@@ -42,9 +43,9 @@ export async function extractExercisesFromPlan(patientId: string, planId: string
       candidates: exercises.map((exercise) => ({ ...exercise, exists: existing.has(exerciseKey(exercise.name)) })),
     };
   } catch (error) {
-    if (error instanceof GeminiError) {
+    if (error instanceof AiError) {
       console.error("Exercise extraction failed:", error.message);
-      return { ok: false, error: GEMINI_ERROR_RESPONSES[error.kind].message };
+      return { ok: false, error: AI_ERROR_RESPONSES[error.kind].message };
     }
     console.error("Exercise extraction failed:", error);
     return { ok: false, error: "Cviky sa nepodarilo vytiahnuť. Skúste to znova." };
