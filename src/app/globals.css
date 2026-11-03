@@ -1,0 +1,76 @@
+@import "tailwindcss";
+
+@theme inline {
+  --font-sans: var(--font-inter);
+}
+
+body {
+  background: var(--color-slate-50);
+  color: var(--color-slate-900);
+}
+
+@layer components {
+  .btn-primary {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl bg-teal-700 px-4 py-2.5 text-base font-semibold text-white transition hover:bg-teal-800 disabled:opacity-60;
+  }
+  .btn-secondary {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl border border-slate-300 bg-white px-4 py-2.5 text-base font-medium text-slate-700 transition hover:bg-slate-50 disabled:opacity-60;
+  }
+  .btn-danger {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl border border-red-200 bg-white px-4 py-2.5 text-base font-medium text-red-700 transition hover:bg-red-50 disabled:opacity-60;
+  }
+  .field-input {
+    @apply w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-base outline-none focus:border-teal-600 focus:ring-2 focus:ring-teal-600/30 aria-invalid:border-red-400;
+  }
+  .card {
+    @apply rounded-2xl bg-white p-5 shadow-sm ring-1 ring-slate-200;
+  }
+}
+
+@layer components {
+  .markdown {
+    @apply space-y-3 leading-relaxed break-words text-slate-800;
+  }
+  .markdown h1,
+  .markdown h2 {
+    @apply mt-4 text-lg font-semibold text-teal-900;
+  }
+  .markdown h3,
+  .markdown h4 {
+    @apply mt-3 font-semibold text-teal-900;
+  }
+  .markdown ul {
+    @apply list-disc space-y-1 pl-5;
+  }
+  .markdown ol {
+    @apply list-decimal space-y-1 pl-5;
+  }
+  .markdown a {
+    @apply font-medium text-teal-700 underline;
+  }
+  .markdown hr {
+    @apply border-slate-200;
+  }
+  .markdown table {
+    @apply w-full border-collapse text-sm;
+  }
+  .markdown th,
+  .markdown td {
+    @apply border border-slate-200 px-2 py-1 text-left align-top;
+  }
+  .markdown th {
+    @apply bg-slate-50 font-semibold;
+  }
+  .markdown code {
+    @apply rounded bg-slate-100 px-1 text-sm;
+  }
+}
+
+@media print {
+  body {
+    background: white;
+  }
+  @page {
+    margin: 15mm;
+  }
+}
