@@ -9,11 +9,11 @@ import { SavePlan } from "./save-plan";
 
 export type PatientOption = { id: string; label: string };
 
-type UiMessage = { id: string; role: "user" | "model"; content: string; stopped?: boolean };
+type UiMessage = { id: string; role: "user" | "model"; content: string; stopped?: boolean; revision?: number };
 
 type StreamBody =
-  | { mode: "message"; conversationId: string | null; patientId: string | null; message: string }
-  | { mode: "continue"; conversationId: string; partial: string };
+  | { mode: "message"; conversationId: string | null; patientId: string | null; answerId: string; message: string }
+  | { mode: "continue"; conversationId: string; answerId: string; revision: number; partial: string };
 
 const BOTTOM_THRESHOLD_PX = 48;
 
@@ -221,7 +221,7 @@ export function AssistantPanel({
       await streamInto(
         modelId,
         "",
-        { mode: "message", conversationId, patientId: conversationId ? null : patientId, message },
+        { mode: "message", conversationId, patientId: conversationId ? null : patientId, answerId: modelId, message },
         controller,
         progress,
       );
@@ -249,17 +249,24 @@ export function AssistantPanel({
     if (!target || !conversationId || streaming) return;
 
     const progress = { text: "" };
+    const revision = (target.revision ?? 0) + 1;
     const controller = beginStream();
-    setMessages((previous) => previous.map((item) => (item.id === modelId ? { ...item, stopped: false } : item)));
+    setMessages((previous) =>
+      previous.map((item) => (item.id === modelId ? { ...item, stopped: false, revision } : item)),
+    );
 
     try {
       await streamInto(
         modelId,
         target.content,
-        { mode: "continue", conversationId, partial: target.content },
+        { mode: "continue", conversationId, answerId: modelId, revision, partial: target.content },
         controller,
         progress,
       );
+      if (!progress.text.trim()) {
+        markStopped(modelId);
+        setError("AI tentoraz nič nedoplnila. Skúste Pokračovať znova.");
+      }
       setHistoryVersion((version) => version + 1);
     } catch (caught) {
       markStopped(modelId);

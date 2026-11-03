@@ -1,15 +1,16 @@
+import { after } from "next/server";
 import * as z from "zod";
 import { CONTINUE_PROMPT, buildSystemInstruction } from "@/lib/ai/context";
 import type { Patient } from "@/lib/patients/model";
 import { hasSession } from "@/lib/server/auth";
 import {
-  addMessage,
+  addUserMessage,
   answerWriter,
   conversationTitle,
   createConversation,
   getConversation,
-  lastMessage,
   recentTurns,
+  type AnswerWriter,
 } from "@/lib/server/conversations";
 import { listLibraryForAi } from "@/lib/server/exercises";
 import { GEMINI_ERROR_RESPONSES, GeminiError, streamChat, type ChatTurn } from "@/lib/server/gemini";
@@ -20,26 +21,24 @@ const BodySchema = z.discriminatedUnion("mode", [
     mode: z.literal("message"),
     conversationId: z.uuid().nullable(),
     patientId: z.uuid().nullable(),
+    answerId: z.uuid(),
     message: z.string().trim().min(1).max(4000),
   }),
   z.object({
     mode: z.literal("continue"),
     conversationId: z.uuid(),
+    answerId: z.uuid(),
+    revision: z.int().min(1).max(1000),
     partial: z.string().min(1).max(100_000),
   }),
 ]);
 
 type Body = z.infer<typeof BodySchema>;
 
-type Committed = {
-  conversationId: string;
-  save: (answer: string) => Promise<void>;
-};
-
 type Prepared = {
   patient: Patient | null;
   turns: ChatTurn[];
-  commit: () => Promise<Committed>;
+  commit: () => Promise<{ conversationId: string; save: AnswerWriter }>;
 };
 
 class RequestError extends Error {
@@ -66,22 +65,17 @@ async function prepare(body: Body): Promise<Prepared> {
   if (body.mode === "continue") {
     const conversation = await getConversation(body.conversationId);
     if (!conversation) throw new RequestError(404, "Rozhovor neexistuje.");
-    const last = await lastMessage(body.conversationId);
-    if (!last || last.role !== "model") throw new RequestError(409, "Nie je čo dokončiť.");
-    const [patient, history] = await Promise.all([loadPatient(conversation.patient_id), recentTurns(body.conversationId)]);
-    const shownHistory = history.map((turn, index) =>
-      index === history.length - 1 ? { ...turn, content: body.partial } : turn,
-    );
+    const [patient, history] = await Promise.all([
+      loadPatient(conversation.patient_id),
+      recentTurns(body.conversationId, body.answerId),
+    ]);
     return {
       patient,
-      turns: [...shownHistory, { role: "user", content: CONTINUE_PROMPT }],
+      turns: [...history, { role: "model", content: body.partial }, { role: "user", content: CONTINUE_PROMPT }],
       commit: async () => {
-        const writer = await answerWriter(body.conversationId);
-        await writer.replace(last.id, body.partial);
-        return {
-          conversationId: body.conversationId,
-          save: (answer) => writer.replace(last.id, body.partial + answer),
-        };
+        const write = await answerWriter(body.conversationId, body.answerId, body.revision);
+        await write(body.partial);
+        return { conversationId: body.conversationId, save: (answer) => write(body.partial + answer) };
       },
     };
   }
@@ -101,9 +95,8 @@ async function prepare(body: Body): Promise<Prepared> {
     turns: [...history, { role: "user", content: body.message }],
     commit: async () => {
       const conversationId = body.conversationId ?? (await createConversation(patientId, conversationTitle(body.message)));
-      await addMessage(conversationId, "user", body.message);
-      const writer = await answerWriter(conversationId);
-      return { conversationId, save: writer.add };
+      await addUserMessage(conversationId, body.message);
+      return { conversationId, save: await answerWriter(conversationId, body.answerId, 0) };
     },
   };
 }
@@ -124,28 +117,44 @@ export async function POST(request: Request): Promise<Response> {
     const { conversationId, save } = await commit();
 
     let answer = "";
-    let saved = false;
-    const persist = async () => {
-      if (saved || !answer.trim()) return;
-      saved = true;
+    let finish!: () => void;
+    const finished = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    request.signal.addEventListener("abort", () => finish(), { once: true });
+    after(async () => {
+      await finished;
+      if (!answer.trim()) return;
       try {
         await save(answer);
       } catch (error) {
         console.error("Saving AI answer failed:", error);
       }
-    };
-    request.signal.addEventListener("abort", () => void persist(), { once: true });
+    });
 
     const encoder = new TextEncoder();
-    const output = stream.pipeThrough(
-      new TransformStream<string, Uint8Array>({
-        transform(chunk, controller) {
-          answer += chunk;
-          controller.enqueue(encoder.encode(chunk));
-        },
-        flush: persist,
-      }),
-    );
+    const reader = stream.getReader();
+    const output = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        try {
+          const { done, value } = await reader.read();
+          if (done) {
+            finish();
+            controller.close();
+            return;
+          }
+          answer += value;
+          controller.enqueue(encoder.encode(value));
+        } catch (error) {
+          finish();
+          controller.error(error);
+        }
+      },
+      async cancel(reason) {
+        finish();
+        await reader.cancel(reason);
+      },
+    });
 
     return new Response(output, {
       headers: {

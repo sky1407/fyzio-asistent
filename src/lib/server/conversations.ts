@@ -62,9 +62,12 @@ export async function listMessages(conversationId: string): Promise<ChatMessage[
   return z.array(MessageSchema).parse(rows);
 }
 
-export async function recentTurns(conversationId: string): Promise<ChatTurn[]> {
+export async function recentTurns(conversationId: string, excludeMessageId?: string): Promise<ChatTurn[]> {
   const messages = await listMessages(conversationId);
-  return messages.slice(-HISTORY_LIMIT).map(({ role, content }) => ({ role, content }));
+  return messages
+    .filter((message) => message.id !== excludeMessageId)
+    .slice(-HISTORY_LIMIT)
+    .map(({ role, content }) => ({ role, content }));
 }
 
 export async function createConversation(patientId: string | null, title: string): Promise<string> {
@@ -76,54 +79,32 @@ export async function createConversation(patientId: string | null, title: string
   return IdRows.parse(rows)[0].id;
 }
 
-export async function addMessage(conversationId: string, role: ChatTurn["role"], content: string): Promise<void> {
+export async function addUserMessage(conversationId: string, content: string): Promise<void> {
   await requireSession();
   const sql = getSql();
   await sql.transaction([
-    sql.query("INSERT INTO messages (conversation_id, role, content) VALUES ($1, $2, $3)", [conversationId, role, content]),
+    sql.query("INSERT INTO messages (conversation_id, role, content) VALUES ($1, 'user', $2)", [conversationId, content]),
     sql.query("UPDATE conversations SET updated_at = now() WHERE id = $1", [conversationId]),
   ]);
 }
 
-export async function lastMessage(conversationId: string): Promise<ChatMessage | null> {
-  await requireSession();
-  if (!isUuid(conversationId)) return null;
-  const rows = await getSql().query(
-    "SELECT id, role, content FROM messages WHERE conversation_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1",
-    [conversationId],
-  );
-  return z.array(MessageSchema).parse(rows)[0] ?? null;
-}
+export type AnswerWriter = (content: string) => Promise<void>;
 
-export type AnswerWriter = {
-  add: (content: string) => Promise<void>;
-  replace: (messageId: string, content: string) => Promise<void>;
-};
-
-export async function answerWriter(conversationId: string): Promise<AnswerWriter> {
+export async function answerWriter(conversationId: string, answerId: string, revision: number): Promise<AnswerWriter> {
   await requireSession();
   const sql = getSql();
-  const touch = () => sql.query("UPDATE conversations SET updated_at = now() WHERE id = $1", [conversationId]);
-  return {
-    add: async (content) => {
-      await sql.transaction([
-        sql.query("INSERT INTO messages (conversation_id, role, content) VALUES ($1, 'model', $2)", [
-          conversationId,
-          content,
-        ]),
-        touch(),
-      ]);
-    },
-    replace: async (messageId, content) => {
-      await sql.transaction([
-        sql.query("UPDATE messages SET content = $3 WHERE id = $1 AND conversation_id = $2", [
-          messageId,
-          conversationId,
-          content,
-        ]),
-        touch(),
-      ]);
-    },
+  return async (content) => {
+    await sql.transaction([
+      sql.query(
+        `INSERT INTO messages (id, conversation_id, role, content, revision) VALUES ($1, $2, 'model', $3, $4)
+         ON CONFLICT (id) DO UPDATE SET content = EXCLUDED.content, revision = EXCLUDED.revision
+         WHERE messages.conversation_id = EXCLUDED.conversation_id
+           AND messages.role = 'model'
+           AND messages.revision <= EXCLUDED.revision`,
+        [answerId, conversationId, content, revision],
+      ),
+      sql.query("UPDATE conversations SET updated_at = now() WHERE id = $1", [conversationId]),
+    ]);
   };
 }
 

@@ -59,7 +59,10 @@ CREATE TABLE IF NOT EXISTS messages (
   conversation_id uuid NOT NULL REFERENCES conversations (id) ON DELETE CASCADE,
   role text NOT NULL CHECK (role IN ('user', 'model')),
   content text NOT NULL CHECK (length(content) BETWEEN 1 AND 100000),
+  revision int NOT NULL DEFAULT 0,
   created_at timestamptz NOT NULL DEFAULT clock_timestamp()
 );
+
+ALTER TABLE messages ADD COLUMN IF NOT EXISTS revision int NOT NULL DEFAULT 0;
 
 CREATE INDEX IF NOT EXISTS messages_conversation_idx ON messages (conversation_id, created_at)
