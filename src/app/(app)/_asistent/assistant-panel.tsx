@@ -9,7 +9,13 @@ import { SavePlan } from "./save-plan";
 
 export type PatientOption = { id: string; label: string };
 
-type UiMessage = { id: string; role: "user" | "model"; content: string };
+type UiMessage = { id: string; role: "user" | "model"; content: string; stopped?: boolean };
+
+type StreamBody =
+  | { mode: "message"; conversationId: string | null; patientId: string | null; message: string }
+  | { mode: "continue"; conversationId: string; partial: string };
+
+const BOTTOM_THRESHOLD_PX = 48;
 
 const QUICK_ACTIONS = [
   {
@@ -58,6 +64,8 @@ export function AssistantPanel({
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const stickToBottomRef = useRef(true);
+  const [atBottom, setAtBottom] = useState(true);
   const openRequestRef = useRef(0);
 
   useEffect(() => {
@@ -76,8 +84,23 @@ export function AssistantPanel({
 
   useEffect(() => {
     const element = scrollRef.current;
-    if (element) element.scrollTop = element.scrollHeight;
+    if (element && stickToBottomRef.current) element.scrollTop = element.scrollHeight;
   }, [messages]);
+
+  function onScroll() {
+    const element = scrollRef.current;
+    if (!element) return;
+    const nearBottom = element.scrollHeight - element.scrollTop - element.clientHeight < BOTTOM_THRESHOLD_PX;
+    stickToBottomRef.current = nearBottom;
+    setAtBottom(nearBottom);
+  }
+
+  function scrollToBottom() {
+    const element = scrollRef.current;
+    stickToBottomRef.current = true;
+    setAtBottom(true);
+    element?.scrollTo({ top: element.scrollHeight, behavior: "smooth" });
+  }
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
@@ -89,6 +112,8 @@ export function AssistantPanel({
     setError(null);
     setHistoryOpen(false);
     setLoadingMessages(false);
+    stickToBottomRef.current = true;
+    setAtBottom(true);
   }
 
   function selectPatient(value: string) {
@@ -123,19 +148,69 @@ export function AssistantPanel({
     }
   }
 
+  async function streamInto(
+    modelId: string,
+    prefix: string,
+    body: StreamBody,
+    controller: AbortController,
+    progress: { text: string },
+  ): Promise<void> {
+    const response = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+    if (response.status === 401) throw new Error("Prihlásenie vypršalo. Obnovte stránku a prihláste sa znova.");
+    if (!response.ok || !response.body) {
+      const data = (await response.json().catch(() => null)) as { error?: string } | null;
+      throw new Error(data?.error ?? "AI neodpovedala. Skúste to znova.");
+    }
+
+    const newConversationId = response.headers.get("X-Conversation-Id");
+    if (newConversationId) setConversationId(newConversationId);
+
+    const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      progress.text += value;
+      const content = prefix + progress.text;
+      setMessages((previous) => previous.map((item) => (item.id === modelId ? { ...item, content } : item)));
+    }
+  }
+
+  function markStopped(modelId: string) {
+    setMessages((previous) =>
+      previous.map((item) => (item.id === modelId && item.content ? { ...item, stopped: true } : item)),
+    );
+  }
+
+  function beginStream(): AbortController {
+    const controller = new AbortController();
+    abortRef.current = controller;
+    stickToBottomRef.current = true;
+    setAtBottom(true);
+    setError(null);
+    setStreaming(true);
+    return controller;
+  }
+
+  function endStream(modelId: string, controller: AbortController) {
+    setMessages((previous) => previous.filter((item) => item.id !== modelId || item.content !== ""));
+    if (abortRef.current === controller) abortRef.current = null;
+    setStreaming(false);
+  }
+
   async function send(text: string) {
     const message = text.trim();
     if (!message || streaming) return;
 
     const userId = crypto.randomUUID();
     const modelId = crypto.randomUUID();
-    const controller = new AbortController();
-    abortRef.current = controller;
-    let received = "";
-
-    setError(null);
+    const progress = { text: "" };
+    const controller = beginStream();
     setInput("");
-    setStreaming(true);
     setMessages((previous) => [
       ...previous,
       { id: userId, role: "user", content: message },
@@ -143,47 +218,56 @@ export function AssistantPanel({
     ]);
 
     try {
-      const response = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ conversationId, patientId: conversationId ? null : patientId, message }),
-        signal: controller.signal,
-      });
-      if (response.status === 401) throw new Error("Prihlásenie vypršalo. Obnovte stránku a prihláste sa znova.");
-      if (!response.ok || !response.body) {
-        const data = (await response.json().catch(() => null)) as { error?: string } | null;
-        throw new Error(data?.error ?? "AI neodpovedala. Skúste to znova.");
-      }
-
-      const newConversationId = response.headers.get("X-Conversation-Id");
-      if (newConversationId) setConversationId(newConversationId);
-
-      const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        received += value;
-        const snapshot = received;
-        setMessages((previous) =>
-          previous.map((item) => (item.id === modelId ? { ...item, content: snapshot } : item)),
-        );
-      }
-      if (!received.trim()) setError("AI nevrátila žiadnu odpoveď. Skúste otázku preformulovať.");
+      await streamInto(
+        modelId,
+        "",
+        { mode: "message", conversationId, patientId: conversationId ? null : patientId, message },
+        controller,
+        progress,
+      );
+      if (!progress.text.trim()) setError("AI nevrátila žiadnu odpoveď. Skúste otázku preformulovať.");
       setHistoryVersion((version) => version + 1);
     } catch (caught) {
       if (controller.signal.aborted) {
+        markStopped(modelId);
         setHistoryVersion((version) => version + 1);
-      } else if (received) {
-        setError("Odpoveď bola prerušená. Skúste to znova.");
+      } else if (progress.text) {
+        markStopped(modelId);
+        setError("Odpoveď bola prerušená. Môžete pokračovať tlačidlom Pokračovať.");
       } else {
         setError(errorMessage(caught));
         setInput(message);
         setMessages((previous) => previous.filter((item) => item.id !== userId && item.id !== modelId));
       }
     } finally {
-      setMessages((previous) => previous.filter((item) => item.id !== modelId || item.content !== ""));
-      if (abortRef.current === controller) abortRef.current = null;
-      setStreaming(false);
+      endStream(modelId, controller);
+    }
+  }
+
+  async function continueAnswer(modelId: string) {
+    const target = messages.find((item) => item.id === modelId);
+    if (!target || !conversationId || streaming) return;
+
+    const progress = { text: "" };
+    const controller = beginStream();
+    setMessages((previous) => previous.map((item) => (item.id === modelId ? { ...item, stopped: false } : item)));
+
+    try {
+      await streamInto(
+        modelId,
+        target.content,
+        { mode: "continue", conversationId, partial: target.content },
+        controller,
+        progress,
+      );
+      setHistoryVersion((version) => version + 1);
+    } catch (caught) {
+      markStopped(modelId);
+      if (!controller.signal.aborted) {
+        setError(progress.text ? "Odpoveď bola prerušená. Môžete pokračovať znova." : errorMessage(caught));
+      }
+    } finally {
+      endStream(modelId, controller);
     }
   }
 
@@ -278,41 +362,69 @@ export function AssistantPanel({
         </div>
       )}
 
-      <div ref={scrollRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto rounded-xl bg-slate-50 p-3" aria-live="polite">
-        {loadingMessages && <p className="text-sm text-slate-500">Načítavam rozhovor…</p>}
-        {!loadingMessages && messages.length === 0 && (
-          <div className="space-y-2 p-2 text-sm text-slate-600">
-            <p>
-              {selectedPatient
-                ? `Pýtajte sa na pacienta ${selectedPatient.label} alebo použite tlačidlá nižšie.`
-                : "Vyberte pacienta, aby AI poznala jeho údaje, alebo položte všeobecnú otázku."}
-            </p>
-            <p className="text-xs text-slate-500">
-              Údaje pacienta sa do AI posielajú bez mena. Do správ nepíšte mená ani rodné čísla.
-            </p>
-          </div>
-        )}
-        {messages.map((message, index) =>
-          message.role === "user" ? (
-            <div key={message.id} className="ml-auto max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-sm bg-teal-700 px-3.5 py-2 text-white">
-              {message.content}
+      <div className="relative min-h-0 flex-1">
+        <div
+          ref={scrollRef}
+          onScroll={onScroll}
+          className="h-full space-y-3 overflow-y-auto rounded-xl bg-slate-50 p-3"
+          aria-live="polite"
+        >
+          {loadingMessages && <p className="text-sm text-slate-500">Načítavam rozhovor…</p>}
+          {!loadingMessages && messages.length === 0 && (
+            <div className="space-y-2 p-2 text-sm text-slate-600">
+              <p>
+                {selectedPatient
+                  ? `Pýtajte sa na pacienta ${selectedPatient.label} alebo použite tlačidlá nižšie.`
+                  : "Vyberte pacienta, aby AI poznala jeho údaje, alebo položte všeobecnú otázku."}
+              </p>
+              <p className="text-xs text-slate-500">
+                Údaje pacienta sa do AI posielajú bez mena. Do správ nepíšte mená ani rodné čísla.
+              </p>
             </div>
-          ) : (
-            <div key={message.id} className="max-w-full rounded-2xl rounded-bl-sm bg-white px-4 py-3 shadow-sm ring-1 ring-slate-200">
-              {message.content ? (
-                <Markdown text={message.content} />
-              ) : (
-                <p className="animate-pulse text-sm text-slate-500">AI premýšľa…</p>
-              )}
-              {selectedPatient && message.content && !(streaming && index === messages.length - 1) && (
-                <SavePlan
-                  patientId={selectedPatient.id}
-                  content={message.content}
-                  defaultTitle={defaultPlanTitle(planTitleSource(index))}
-                />
-              )}
-            </div>
-          ),
+          )}
+          {messages.map((message, index) =>
+            message.role === "user" ? (
+              <div key={message.id} className="ml-auto max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-sm bg-teal-700 px-3.5 py-2 text-white">
+                {message.content}
+              </div>
+            ) : (
+              <div key={message.id} className="max-w-full rounded-2xl rounded-bl-sm bg-white px-4 py-3 shadow-sm ring-1 ring-slate-200">
+                {message.content ? (
+                  <Markdown text={message.content} />
+                ) : (
+                  <p className="animate-pulse text-sm text-slate-500">AI premýšľa…</p>
+                )}
+                {message.stopped && !streaming && conversationId && (
+                  <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-slate-100 pt-3">
+                    <span className="text-sm text-slate-500">Odpoveď bola zastavená.</span>
+                    <button
+                      type="button"
+                      onClick={() => void continueAnswer(message.id)}
+                      className="rounded-full bg-teal-700 px-3 py-1.5 text-sm font-semibold text-white hover:bg-teal-800"
+                    >
+                      Pokračovať
+                    </button>
+                  </div>
+                )}
+                {selectedPatient && message.content && !(streaming && index === messages.length - 1) && (
+                  <SavePlan
+                    patientId={selectedPatient.id}
+                    content={message.content}
+                    defaultTitle={defaultPlanTitle(planTitleSource(index))}
+                  />
+                )}
+              </div>
+            ),
+          )}
+        </div>
+        {!atBottom && messages.length > 0 && (
+          <button
+            type="button"
+            onClick={scrollToBottom}
+            className="absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full bg-teal-700 px-3.5 py-1.5 text-sm font-semibold text-white shadow-lg hover:bg-teal-800"
+          >
+            ↓ Na koniec
+          </button>
         )}
       </div>
 

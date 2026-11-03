@@ -85,6 +85,48 @@ export async function addMessage(conversationId: string, role: ChatTurn["role"],
   ]);
 }
 
+export async function lastMessage(conversationId: string): Promise<ChatMessage | null> {
+  await requireSession();
+  if (!isUuid(conversationId)) return null;
+  const rows = await getSql().query(
+    "SELECT id, role, content FROM messages WHERE conversation_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1",
+    [conversationId],
+  );
+  return z.array(MessageSchema).parse(rows)[0] ?? null;
+}
+
+export type AnswerWriter = {
+  add: (content: string) => Promise<void>;
+  replace: (messageId: string, content: string) => Promise<void>;
+};
+
+export async function answerWriter(conversationId: string): Promise<AnswerWriter> {
+  await requireSession();
+  const sql = getSql();
+  const touch = () => sql.query("UPDATE conversations SET updated_at = now() WHERE id = $1", [conversationId]);
+  return {
+    add: async (content) => {
+      await sql.transaction([
+        sql.query("INSERT INTO messages (conversation_id, role, content) VALUES ($1, 'model', $2)", [
+          conversationId,
+          content,
+        ]),
+        touch(),
+      ]);
+    },
+    replace: async (messageId, content) => {
+      await sql.transaction([
+        sql.query("UPDATE messages SET content = $3 WHERE id = $1 AND conversation_id = $2", [
+          messageId,
+          conversationId,
+          content,
+        ]),
+        touch(),
+      ]);
+    },
+  };
+}
+
 export async function deleteConversation(id: string): Promise<boolean> {
   await requireSession();
   if (!isUuid(id)) return false;

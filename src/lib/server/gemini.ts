@@ -23,7 +23,7 @@ export const GEMINI_ERROR_RESPONSES: Record<GeminiErrorKind, { status: number; m
 };
 
 const API_BASE ="https://generativelanguage.googleapis.com/v1beta/models";
-const FALLBACK_MODELS = ["gemini-2.5-flash", "gemini-3.5-flash", "gemini-3.5-flash-lite"];
+const FALLBACK_MODELS = ["gemini-2.5-flash", "gemini-3.5-flash-lite", "gemini-3.5-flash"];
 const RETRYABLE_STATUSES = new Set([404, 429, 500, 503]);
 const REQUEST_TIMEOUT_MS = 120_000;
 

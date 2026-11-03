@@ -47,6 +47,9 @@ export function buildPatientContext(patient: Patient, now: Date = new Date()): s
     : "## Profil pacienta (anonymizovaný)\nO pacientovi zatiaľ nie sú vyplnené žiadne údaje.";
 }
 
+export const CONTINUE_PROMPT =
+  "Tvoja predchádzajúca odpoveď bola prerušená. Pokračuj presne tam, kde si prestal, aj keby to bolo uprostred vety alebo zoznamu. Neopakuj už napísaný text, nezačínaj trojbodkou a nepridávaj úvod ani zhrnutie navyše.";
+
 export type LibraryExercise = { name: string; target: string };
 
 export const LIBRARY_LIMIT = 150;
