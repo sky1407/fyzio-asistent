@@ -1,5 +1,6 @@
 import "server-only";
 import type * as z from "zod";
+import type { Redactor } from "@/lib/ai/redact";
 import { AiError, type ChatTurn } from "./ai-common";
 import { generateGeminiJson, streamGemini } from "./gemini";
 import { compatibleProviders, generateCompatibleJson, streamCompatible } from "./openai-compatible";
@@ -27,13 +28,16 @@ export async function streamChat(
   systemInstruction: string,
   history: ChatTurn[],
   signal: AbortSignal,
+  redact: Redactor,
 ): Promise<{ stream: ReadableStream<string>; provider: string }> {
+  const safeInstruction = redact(systemInstruction);
+  const safeHistory = history.map((turn) => ({ role: turn.role, content: redact(turn.content) }));
   const { value, provider } = await withFallback<ReadableStream<string>>(
     [
-      { provider: "Gemini", run: () => streamGemini(systemInstruction, history, signal) },
+      { provider: "Gemini", run: () => streamGemini(safeInstruction, safeHistory, signal) },
       ...compatibleProviders().map((config) => ({
         provider: config.label,
-        run: () => streamCompatible(config, systemInstruction, history, signal),
+        run: () => streamCompatible(config, safeInstruction, safeHistory, signal),
       })),
     ],
     signal,
@@ -46,16 +50,20 @@ export async function generateJson<T>(
   responseSchema: object,
   validator: z.ZodType<T>,
   signal: AbortSignal,
+  redact: Redactor,
+  options: { preferFallback?: boolean } = {},
 ): Promise<T> {
-  const { value } = await withFallback<T>(
-    [
-      { provider: "Gemini", run: () => generateGeminiJson(prompt, responseSchema, validator, signal) },
-      ...compatibleProviders().map((config) => ({
-        provider: config.label,
-        run: () => generateCompatibleJson(config, prompt, responseSchema, validator, signal),
-      })),
-    ],
-    signal,
-  );
+  const safePrompt = redact(prompt);
+  const gemini: Attempt<T> = {
+    provider: "Gemini",
+    run: () => generateGeminiJson(safePrompt, responseSchema, validator, signal),
+  };
+  const compatible: Attempt<T>[] = compatibleProviders().map((config) => ({
+    provider: config.label,
+    run: () => generateCompatibleJson(config, safePrompt, responseSchema, validator, signal),
+  }));
+  const attempts =
+    options.preferFallback && compatible.length > 0 ? [...compatible, gemini] : [gemini, ...compatible];
+  const { value } = await withFallback<T>(attempts, signal);
   return value;
 }

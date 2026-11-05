@@ -3,8 +3,18 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import type { ConversationSummary } from "@/lib/server/conversations";
 import { Markdown } from "@/components/markdown";
+import { isSummaryEmpty, type AnswerSummary } from "@/lib/ai/summary";
+import type { Review } from "@/lib/ai/review";
+import type { NutritionCheck } from "@/lib/nutrition/model";
 import { defaultPlanTitle } from "@/lib/plans/model";
-import { loadConversations, loadMessages, removeConversation } from "./actions";
+import {
+  checkPlanNutrition,
+  loadConversations,
+  loadMessages,
+  removeConversation,
+  reviewAnswer,
+  summarizeAnswer,
+} from "./actions";
 import { SavePlan } from "./save-plan";
 
 export type PatientOption = { id: string; label: string };
@@ -16,6 +26,15 @@ type UiMessage = {
   stopped?: boolean;
   revision?: number;
   provider?: string;
+  summary?: AnswerSummary;
+  summarizing?: boolean;
+  summaryError?: string;
+  nutrition?: NutritionCheck;
+  nutritionLoading?: boolean;
+  nutritionError?: string;
+  review?: Review;
+  reviewLoading?: boolean;
+  reviewError?: string;
 };
 
 type StreamBody =
@@ -50,6 +69,105 @@ const QUICK_ACTIONS = [
 function errorMessage(error: unknown): string {
   if (error instanceof TypeError) return "Nepodarilo sa spojiť so serverom. Skontrolujte pripojenie.";
   return error instanceof Error ? error.message : "Nastala chyba. Skúste to znova.";
+}
+
+function SummaryList({ label, items, tone }: { label: string; items: string[]; tone?: "danger" }) {
+  if (items.length === 0) return null;
+  return (
+    <div>
+      <p className={`font-medium ${tone === "danger" ? "text-red-800" : "text-slate-700"}`}>{label}</p>
+      <ul className="ml-4 list-disc">
+        {items.map((item, index) => (
+          <li key={index}>{item}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function AnswerSummaryCard({ summary }: { summary: AnswerSummary }) {
+  return (
+    <div className="space-y-2 rounded-xl bg-slate-50 p-3 text-sm ring-1 ring-slate-200">
+      <p className="font-semibold text-teal-800">Štruktúrované zhrnutie</p>
+      {summary.hlavny_problem && (
+        <p>
+          <span className="font-medium text-slate-700">Hlavný problém: </span>
+          {summary.hlavny_problem}
+        </p>
+      )}
+      <SummaryList label="Odporúčané cviky" items={summary.odporucane_cviky} />
+      <SummaryList label="Kontraindikácie" items={summary.kontraindikacie} />
+      {summary.red_flags.length > 0 && (
+        <div className="rounded-lg bg-red-50 p-2 ring-1 ring-red-200">
+          <SummaryList label="Varovné príznaky (red flags)" items={summary.red_flags} tone="danger" />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function NutritionCard({ check }: { check: NutritionCheck }) {
+  return (
+    <div className="space-y-2 rounded-xl bg-slate-50 p-3 text-sm ring-1 ring-slate-200">
+      <p className="font-semibold text-teal-800">Overenie výživy</p>
+      <p>
+        <span className="font-medium text-slate-700">Spolu: </span>
+        {check.totalKcal} kcal · B {check.totalProtein} g · S {check.totalCarbs} g · T {check.totalFat} g
+      </p>
+      {check.need && (
+        <p>
+          <span className="font-medium text-slate-700">Odhadovaná potreba: </span>
+          {check.need.min}–{check.need.max} kcal (cieľ {check.need.target})
+        </p>
+      )}
+      {check.warnings.length > 0 ? (
+        <div className="rounded-lg bg-amber-50 p-2 ring-1 ring-amber-200">
+          <ul className="ml-4 list-disc text-amber-900">
+            {check.warnings.map((warning, index) => (
+              <li key={index}>{warning}</li>
+            ))}
+          </ul>
+        </div>
+      ) : (
+        <p className="text-emerald-700">Kalórie aj makroživiny vychádzajú konzistentne.</p>
+      )}
+      <p className="text-xs text-slate-400">Orientačný odhad (Mifflin–St Jeor), nie lekárska diéta.</p>
+    </div>
+  );
+}
+
+const SEVERITY_LABEL: Record<Review["zistenia"][number]["zavaznost"], string> = {
+  vysoka: "Vysoká",
+  stredna: "Stredná",
+  nizka: "Nízka",
+};
+
+function ReviewCard({ review }: { review: Review }) {
+  if (review.verdikt === "v_poriadku") {
+    return (
+      <div className="rounded-xl bg-emerald-50 p-3 text-sm text-emerald-800 ring-1 ring-emerald-200">
+        Kontrola nenašla rizikové miesta voči údajom pacienta.
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-2 rounded-xl bg-slate-50 p-3 text-sm ring-1 ring-slate-200">
+      <p className="font-semibold text-teal-800">Kontrola návrhu (nezávislý model)</p>
+      <ul className="space-y-2">
+        {review.zistenia.map((finding, index) => (
+          <li key={index} className="rounded-lg bg-white p-2 ring-1 ring-slate-200">
+            <p className="font-medium text-slate-800">
+              <span className={finding.zavaznost === "vysoka" ? "text-red-700" : "text-slate-500"}>
+                [{SEVERITY_LABEL[finding.zavaznost]}]
+              </span>{" "}
+              {finding.problem}
+            </p>
+            {finding.odporucanie && <p className="text-slate-600">{finding.odporucanie}</p>}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
 }
 
 export function AssistantPanel({
@@ -287,6 +405,74 @@ export function AssistantPanel({
     }
   }
 
+  async function summarize(modelId: string) {
+    const target = messages.find((item) => item.id === modelId);
+    if (!target || !target.content || target.summarizing) return;
+
+    setMessages((previous) =>
+      previous.map((item) => (item.id === modelId ? { ...item, summarizing: true, summaryError: undefined } : item)),
+    );
+    try {
+      const result = await summarizeAnswer(patientId, target.content);
+      setMessages((previous) =>
+        previous.map((item) => {
+          if (item.id !== modelId) return item;
+          if (!result.ok) return { ...item, summarizing: false, summaryError: result.error };
+          if (isSummaryEmpty(result.summary)) {
+            return { ...item, summarizing: false, summaryError: "Z odpovede sa nedali vytiahnuť štruktúrované údaje." };
+          }
+          return { ...item, summarizing: false, summary: result.summary };
+        }),
+      );
+    } catch {
+      setMessages((previous) =>
+        previous.map((item) =>
+          item.id === modelId
+            ? { ...item, summarizing: false, summaryError: "Zhrnutie sa nepodarilo vytvoriť. Skúste to znova." }
+            : item,
+        ),
+      );
+    }
+  }
+
+  function patchMessage(modelId: string, patch: Partial<UiMessage>) {
+    setMessages((previous) => previous.map((item) => (item.id === modelId ? { ...item, ...patch } : item)));
+  }
+
+  async function runNutrition(modelId: string) {
+    const target = messages.find((item) => item.id === modelId);
+    if (!target || !target.content || target.nutritionLoading) return;
+    patchMessage(modelId, { nutritionLoading: true, nutritionError: undefined });
+    try {
+      const result = await checkPlanNutrition(patientId, target.content);
+      patchMessage(
+        modelId,
+        result.ok
+          ? { nutritionLoading: false, nutrition: result.check }
+          : { nutritionLoading: false, nutritionError: result.error },
+      );
+    } catch {
+      patchMessage(modelId, { nutritionLoading: false, nutritionError: "Výživu sa nepodarilo overiť." });
+    }
+  }
+
+  async function runReview(modelId: string) {
+    const target = messages.find((item) => item.id === modelId);
+    if (!target || !target.content || target.reviewLoading) return;
+    patchMessage(modelId, { reviewLoading: true, reviewError: undefined });
+    try {
+      const result = await reviewAnswer(patientId, target.content);
+      patchMessage(
+        modelId,
+        result.ok
+          ? { reviewLoading: false, review: result.review }
+          : { reviewLoading: false, reviewError: result.error },
+      );
+    } catch {
+      patchMessage(modelId, { reviewLoading: false, reviewError: "Kontrolu sa nepodarilo spraviť." });
+    }
+  }
+
   function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     void send(input);
@@ -423,6 +609,48 @@ export function AssistantPanel({
                     >
                       Pokračovať
                     </button>
+                  </div>
+                )}
+                {message.content && !(streaming && index === messages.length - 1) && (
+                  <div className="mt-3 space-y-2 border-t border-slate-100 pt-3">
+                    <div className="flex flex-wrap gap-2">
+                      {!message.summary && (
+                        <button
+                          type="button"
+                          onClick={() => void summarize(message.id)}
+                          disabled={message.summarizing}
+                          className="rounded-full border border-slate-200 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                        >
+                          {message.summarizing ? "Vytváram zhrnutie…" : "Štruktúrované zhrnutie"}
+                        </button>
+                      )}
+                      {selectedPatient && !message.nutrition && (
+                        <button
+                          type="button"
+                          onClick={() => void runNutrition(message.id)}
+                          disabled={message.nutritionLoading}
+                          className="rounded-full border border-slate-200 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                        >
+                          {message.nutritionLoading ? "Overujem výživu…" : "Overiť výživu"}
+                        </button>
+                      )}
+                      {selectedPatient && !message.review && (
+                        <button
+                          type="button"
+                          onClick={() => void runReview(message.id)}
+                          disabled={message.reviewLoading}
+                          className="rounded-full border border-slate-200 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                        >
+                          {message.reviewLoading ? "Kontrolujem…" : "Skontrolovať plán"}
+                        </button>
+                      )}
+                    </div>
+                    {message.summaryError && <p className="text-sm text-red-700">{message.summaryError}</p>}
+                    {message.nutritionError && <p className="text-sm text-red-700">{message.nutritionError}</p>}
+                    {message.reviewError && <p className="text-sm text-red-700">{message.reviewError}</p>}
+                    {message.summary && <AnswerSummaryCard summary={message.summary} />}
+                    {message.nutrition && <NutritionCard check={message.nutrition} />}
+                    {message.review && <ReviewCard review={message.review} />}
                   </div>
                 )}
                 {selectedPatient && message.content && !(streaming && index === messages.length - 1) && (

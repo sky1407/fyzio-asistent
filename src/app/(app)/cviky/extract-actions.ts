@@ -9,11 +9,13 @@ import {
   buildExtractionPrompt,
   normalizeExtracted,
 } from "@/lib/ai/extract";
+import { buildRedactor } from "@/lib/ai/redact";
 import { ExerciseInputSchema, exerciseKey, type ExerciseInput } from "@/lib/exercises/model";
 import { requireSession } from "@/lib/server/auth";
 import { addExercises, listExerciseKeys } from "@/lib/server/exercises";
 import { AI_ERROR_RESPONSES, AiError } from "@/lib/server/ai-common";
 import { generateJson } from "@/lib/server/llm";
+import { getPatient } from "@/lib/server/patients";
 import { getPlan } from "@/lib/server/plans";
 
 const EXTRACTION_TIMEOUT_MS = 90_000;
@@ -27,14 +29,16 @@ export type AddResult = { ok: true; added: number } | { ok: false; error: string
 export async function extractExercisesFromPlan(patientId: string, planId: string): Promise<ExtractResult> {
   await requireSession();
   try {
-    const plan = await getPlan(patientId, planId);
+    const [plan, patient] = await Promise.all([getPlan(patientId, planId), getPatient(patientId)]);
     if (!plan) return { ok: false, error: "Plán neexistuje." };
 
+    const redact = buildRedactor(patient ? [patient.first_name, patient.last_name] : []);
     const result = await generateJson(
       buildExtractionPrompt(plan.content),
       EXTRACTION_RESPONSE_SCHEMA,
       ExtractionResultSchema,
       AbortSignal.timeout(EXTRACTION_TIMEOUT_MS),
+      redact,
     );
     const exercises = normalizeExtracted(result);
     const existing = await listExerciseKeys();

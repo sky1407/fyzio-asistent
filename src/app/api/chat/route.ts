@@ -1,6 +1,7 @@
 import { after } from "next/server";
 import * as z from "zod";
 import { CONTINUE_PROMPT, buildSystemInstruction } from "@/lib/ai/context";
+import { buildRedactor } from "@/lib/ai/redact";
 import type { Patient } from "@/lib/patients/model";
 import { hasSession } from "@/lib/server/auth";
 import {
@@ -114,7 +115,8 @@ export async function POST(request: Request): Promise<Response> {
 
   try {
     const [{ patient, turns, commit }, library] = await Promise.all([prepare(body), listLibraryForAi()]);
-    const { stream, provider } = await streamChat(buildSystemInstruction(patient, library), turns, request.signal);
+    const redact = buildRedactor(patient ? [patient.first_name, patient.last_name] : []);
+    const { stream, provider } = await streamChat(buildSystemInstruction(patient, library), turns, request.signal, redact);
     const { conversationId, save } = await commit();
 
     let answer = "";
